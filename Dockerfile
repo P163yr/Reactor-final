@@ -17,24 +17,173 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     && rm -rf /var/lib/apt/lists/*
 
-# install custom nodes that work through Comfy Registry
+# install custom nodes
 RUN comfy node install comfyui-videohelpersuite
 RUN comfy node install comfyui-frame-interpolation
-RUN comfy node install video-output-bridge
 
-# install ReActor manually
-# DO NOT use: RUN comfy node install comfyui-reactor
+# install ReActor manually so ReActorFaceSwap definitely exists
+# Do NOT rely only on: comfy node install comfyui-reactor
 RUN rm -rf /comfyui/custom_nodes/ComfyUI-ReActor \
     && git clone --depth=1 https://github.com/Gourieff/ComfyUI-ReActor /comfyui/custom_nodes/ComfyUI-ReActor \
     && python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel importlib-metadata \
     && python3 -m pip install --no-cache-dir -r /comfyui/custom_nodes/ComfyUI-ReActor/requirements.txt \
     && python3 /comfyui/custom_nodes/ComfyUI-ReActor/install.py
 
-# fail the build if ReActorFaceSwap is not actually present
+# fail build early if ReActorFaceSwap is missing
 RUN test -f /comfyui/custom_nodes/ComfyUI-ReActor/nodes.py \
     && grep -q "ReActorFaceSwap" /comfyui/custom_nodes/ComfyUI-ReActor/nodes.py
 
+# patched local VideoOutputBridge
+# This avoids the error:
+# 'bool' object has no attribute 'get'
+RUN mkdir -p /comfyui/custom_nodes/ComfyUI-VideoOutputBridge \
+    && cat > /comfyui/custom_nodes/ComfyUI-VideoOutputBridge/__init__.py <<'PY'
+from pathlib import Path
+
+OUTPUT_DIR = Path("/comfyui/output")
+
+
+class VideoOutputBridge:
+    CATEGORY = "Utility/Bridges"
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    FUNCTION = "forward"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "filenames": ("VHS_FILENAMES",),
+                "label": (
+                    "STRING",
+                    {
+                        "default": "faceswap_video",
+                        "multiline": False
+                    },
+                ),
+            }
+        }
+
+    def _flatten(self, value):
+        if value is None:
+            return []
+
+        # VideoHelperSuite can return values like:
+        # (True, [file_info])
+        # The original bridge can crash on the True bool.
+        if isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], bool):
+            return self._flatten(value[1])
+
+        if isinstance(value, bool):
+            return []
+
+        if isinstance(value, (list, tuple)):
+            out = []
+            for item in value:
+                out.extend(self._flatten(item))
+            return out
+
+        if isinstance(value, dict):
+            if "gifs" in value:
+                return self._flatten(value["gifs"])
+            if "images" in value and "filename" not in value:
+                return self._flatten(value["images"])
+            return [value]
+
+        return [value]
+
+    def _as_image_item(self, entry):
+        video_exts = {
+            ".mp4", ".webm", ".mov", ".mkv", ".avi", ".gif", ".webp"
+        }
+
+        # Dict format from ComfyUI/VHS
+        if isinstance(entry, dict):
+            filename = entry.get("filename") or entry.get("name")
+            if not filename:
+                return None
+
+            suffix = Path(filename).suffix.lower()
+
+            # Skip image previews/metadata PNGs
+            if suffix in {".png", ".jpg", ".jpeg"}:
+                return None
+
+            if suffix and suffix not in video_exts:
+                return None
+
+            return {
+                "filename": filename,
+                "subfolder": entry.get("subfolder", ""),
+                "type": entry.get("type", "output")
+            }
+
+        # String/path format
+        if isinstance(entry, str):
+            p = Path(entry)
+            suffix = p.suffix.lower()
+
+            # Skip image previews/metadata PNGs
+            if suffix in {".png", ".jpg", ".jpeg"}:
+                return None
+
+            if suffix and suffix not in video_exts:
+                return None
+
+            subfolder = ""
+
+            try:
+                rel = p.resolve().relative_to(OUTPUT_DIR.resolve())
+                subfolder = "" if str(rel.parent) == "." else str(rel.parent)
+            except Exception:
+                if not p.is_absolute() and str(p.parent) != ".":
+                    subfolder = str(p.parent)
+
+            return {
+                "filename": p.name,
+                "subfolder": subfolder,
+                "type": "output"
+            }
+
+        return None
+
+    def forward(self, filenames, label):
+        print(f"[VideoOutputBridge] raw type={type(filenames).__name__}, value={filenames}")
+
+        flat = self._flatten(filenames)
+        print(f"[VideoOutputBridge] flattened={flat}")
+
+        images = []
+
+        for entry in flat:
+            item = self._as_image_item(entry)
+            if item is not None:
+                images.append(item)
+
+        if not images:
+            print("[VideoOutputBridge] no video files found")
+        else:
+            print(f"[VideoOutputBridge] returning images={images}")
+
+        return {
+            "ui": {
+                "images": images
+            }
+        }
+
+
+NODE_CLASS_MAPPINGS = {
+    "VideoOutputBridge": VideoOutputBridge
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "VideoOutputBridge": "Video Output Bridge"
+}
+PY
+
 # create model downloader script
+# Models download at container startup to avoid huge Docker build layers.
 RUN cat > /download_models.sh <<'EOF'
 #!/usr/bin/env bash
 set -e
@@ -87,7 +236,7 @@ download_if_missing \
   "/comfyui/models/hyperswap/hyperswap_1a_256.onnx" \
   100
 
-# ReActor face restoration model
+# ReActor face restore model
 download_if_missing \
   "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/codeformer-v0.1.0.pth" \
   "/comfyui/models/facerestore_models/codeformer-v0.1.0.pth" \
@@ -99,7 +248,7 @@ download_if_missing \
   "/comfyui/models/facedetection/yolov5l-face.pth" \
   20
 
-# face parsing helper
+# Face parsing helper
 download_if_missing \
   "https://huggingface.co/gmk123/GFPGAN/resolve/main/parsing_parsenet.pth" \
   "/comfyui/models/facedetection/parsing_parsenet.pth" \
