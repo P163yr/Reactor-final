@@ -3,7 +3,7 @@ FROM runpod/worker-comfyui:5.5.1-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# install system dependencies for video loading / combining
+# install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     git \
@@ -17,11 +17,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     && rm -rf /var/lib/apt/lists/*
 
-# install custom nodes from Comfy Registry
+# install custom nodes that work through Comfy Registry
 RUN comfy node install comfyui-videohelpersuite
 RUN comfy node install comfyui-frame-interpolation
-RUN comfy node install comfyui-reactor
 RUN comfy node install video-output-bridge
+
+# install ReActor manually
+# DO NOT use: RUN comfy node install comfyui-reactor
+RUN rm -rf /comfyui/custom_nodes/ComfyUI-ReActor \
+    && git clone --depth=1 https://github.com/Gourieff/ComfyUI-ReActor /comfyui/custom_nodes/ComfyUI-ReActor \
+    && python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel importlib-metadata \
+    && python3 -m pip install --no-cache-dir -r /comfyui/custom_nodes/ComfyUI-ReActor/requirements.txt \
+    && python3 /comfyui/custom_nodes/ComfyUI-ReActor/install.py
+
+# fail the build if ReActorFaceSwap is not actually present
+RUN test -f /comfyui/custom_nodes/ComfyUI-ReActor/nodes.py \
+    && grep -q "ReActorFaceSwap" /comfyui/custom_nodes/ComfyUI-ReActor/nodes.py
 
 # create model downloader script
 RUN cat > /download_models.sh <<'EOF'
@@ -70,26 +81,31 @@ download_if_missing() {
   echo "[models] done: $OUT"
 }
 
+# ReActor HyperSwap model
 download_if_missing \
   "https://huggingface.co/facefusion/models-3.3.0/resolve/main/hyperswap_1a_256.onnx" \
   "/comfyui/models/hyperswap/hyperswap_1a_256.onnx" \
   100
 
+# ReActor face restoration model
 download_if_missing \
   "https://huggingface.co/datasets/Gourieff/ReActor/resolve/main/models/facerestore_models/codeformer-v0.1.0.pth" \
   "/comfyui/models/facerestore_models/codeformer-v0.1.0.pth" \
   100
 
+# YOLOv5l face detection helper
 download_if_missing \
   "https://huggingface.co/martintomov/comfy/resolve/main/facedetection/yolov5l-face.pth" \
   "/comfyui/models/facedetection/yolov5l-face.pth" \
   20
 
+# face parsing helper
 download_if_missing \
   "https://huggingface.co/gmk123/GFPGAN/resolve/main/parsing_parsenet.pth" \
   "/comfyui/models/facedetection/parsing_parsenet.pth" \
   5
 
+# FILM VFI model
 download_if_missing \
   "https://huggingface.co/nguu/film-pytorch/resolve/887b2c42bebcb323baf6c3b6d59304135699b575/film_net_fp32.pt" \
   "/comfyui/custom_nodes/ComfyUI-Frame-Interpolation/ckpts/film/film_net_fp32.pt" \
@@ -98,7 +114,7 @@ EOF
 
 RUN chmod +x /download_models.sh
 
-# explicitly start the normal RunPod ComfyUI worker after model setup
+# start normal RunPod ComfyUI worker after model setup
 RUN cat > /start_with_models.sh <<'EOF'
 #!/usr/bin/env bash
 set -e
