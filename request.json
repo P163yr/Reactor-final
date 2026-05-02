@@ -1,0 +1,100 @@
+{
+  "input": {
+    "images": [
+      {
+        "name": "source_face.jpg",
+        "image": "<Base 64 Image>"
+      },
+      {
+        "name": "target.mp4",
+        "image": "<Base 64 Video>"
+      }
+    ],
+    "workflow": {
+      "4": {
+        "inputs": {
+          "image": "source_face.jpg"
+        },
+        "class_type": "LoadImage"
+      },
+      "43": {
+        "inputs": {
+          "video": "target.mp4",
+          "force_rate": 0,
+          "custom_width": 0,
+          "custom_height": 0,
+          "frame_load_cap": 0,
+          "skip_first_frames": 0,
+          "select_every_nth": 1,
+          "format": "AnimateDiff"
+        },
+        "class_type": "VHS_LoadVideo"
+      },
+      "5": {
+        "inputs": {
+          "enabled": true,
+          "input_image": [
+            "43",
+            0
+          ],
+          "source_image": [
+            "4",
+            0
+          ],
+          "swap_model": "hyperswap_1a_256.onnx",
+          "facedetection": "YOLOv5l",
+          "face_restore_model": "codeformer-v0.1.0.pth",
+          "face_restore_visibility": 1,
+          "codeformer_weight": 0.7,
+          "detect_gender_input": "no",
+          "detect_gender_source": "no",
+          "input_faces_index": "0",
+          "source_faces_index": "0",
+          "console_log_level": 1
+        },
+        "class_type": "ReActorFaceSwap"
+      },
+      "17": {
+        "inputs": {
+          "frames": [
+            "5",
+            0
+          ],
+          "ckpt_name": "film_net_fp32.pt",
+          "clear_cache_after_n_frames": 10,
+          "multiplier": 2
+        },
+        "class_type": "FILM VFI"
+      },
+      "16": {
+        "inputs": {
+          "images": [
+            "17",
+            0
+          ],
+          "frame_rate": 25,
+          "loop_count": 0,
+          "filename_prefix": "faceswap_video",
+          "format": "video/h264-mp4",
+          "pix_fmt": "yuv420p",
+          "crf": 19,
+          "save_metadata": true,
+          "trim_to_audio": false,
+          "pingpong": false,
+          "save_output": true
+        },
+        "class_type": "VHS_VideoCombine"
+      },
+      "50": {
+        "inputs": {
+          "filenames": [
+            "16",
+            0
+          ],
+          "label": "faceswap_video"
+        },
+        "class_type": "VideoOutputBridge"
+      }
+    }
+  }
+}
